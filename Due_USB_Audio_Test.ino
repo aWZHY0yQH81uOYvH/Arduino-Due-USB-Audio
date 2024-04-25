@@ -4,7 +4,17 @@
 #define BUF_SIZE 64
 #define ZERO_BUF_SIZE 16
 
-// Ring buffer of buffers to handle interface between computer's sample rate and ours
+// Dynamic sample rate
+#define MIN_SAMPLE_RATE 47950
+#define NOM_SAMPLE_RATE 48000
+#define MAX_SAMPLE_RATE 48050
+
+// Artifically increase resolution of period to help stabilize sample rate
+#define PERIOD_ADJ_SPEED 6
+
+uint32_t period = (F_CPU/NOM_SAMPLE_RATE) << PERIOD_ADJ_SPEED;
+
+// Ring buffer of buffers
 struct Buffer {
   uint16_t len;
   uint16_t buf[BUF_SIZE];
@@ -13,7 +23,7 @@ struct Buffer {
 volatile Buffer bufs[NBUFS];
 uint8_t read_buffer, write_buffer;
 
-// Flag to drop incoming buffers if we're behind on playing
+// Flag to drop incoming buffers if we're really behind on playing
 bool purge_bufs;
 
 // Empty buffer to insert when no data available
@@ -32,7 +42,7 @@ void set_buffer() {
   uint8_t filled = bufs_filled();
 
   // If there is some data, play it with DMA
-  if(filled > 1) {
+  if(filled) {
     PDC_DACC->PERIPH_TNPR = (uint32_t)bufs[read_buffer].buf;
     PDC_DACC->PERIPH_TNCR = bufs[read_buffer].len;
 
@@ -40,6 +50,7 @@ void set_buffer() {
     read_buffer++;
     if(read_buffer >= NBUFS)
       read_buffer = 0;
+    filled--;
   }
 
   // Otherwise insert a bit of silence
@@ -47,6 +58,13 @@ void set_buffer() {
     PDC_DACC->PERIPH_TNPR = (uint32_t)zero_buf;
     PDC_DACC->PERIPH_TNCR = ZERO_BUF_SIZE;
   }
+
+  // Update sample rate based on current buffer fill level
+  if(filled > 1)
+    period = max(period-1, (F_CPU/MAX_SAMPLE_RATE) << PERIOD_ADJ_SPEED);
+  else if(filled == 0)
+    period = min(period+1, (F_CPU/MIN_SAMPLE_RATE) << PERIOD_ADJ_SPEED);
+  PWM->PWM_CH_NUM[0].PWM_CPRDUPD = period >> PERIOD_ADJ_SPEED;
 }
 
 // ISR called when one buffer has been played
@@ -66,7 +84,7 @@ void setup() {
   PWM->PWM_ELMR[0] = PWM_ELMR_CSEL0; // Generate an event on line 0 when compare 0 matches
   PWM->PWM_CMP[0].PWM_CMPV = 1; // Set compare 0 to trigger when channel 0 is 1 (zero doesn't work)
   PWM->PWM_CMP[0].PWM_CMPM = PWM_CMPM_CEN; // Enable compare 0
-  PWM->PWM_CH_NUM[0].PWM_CPRD = F_CPU/48000; // Set period to 48kHz
+  PWM->PWM_CH_NUM[0].PWM_CPRD = period >> PERIOD_ADJ_SPEED; // Set period to 48kHz
   PWM->PWM_CH_NUM[0].PWM_CCNT = 0; // Reset counter
 
   // Set up DAC
@@ -89,19 +107,16 @@ void setup() {
 
   // Start PWM as DAC clock
   PWM->PWM_ENA = PWM_ENA_CHID0;
-
-  // Wait for USB audio to enumerate and start providing samples
-  while(!USBAudio.available());
 }
 
 void loop() {
-  // Temporary place for unprocessed USB audio samples
-  static uint16_t rx_buf[BUF_SIZE];
+  if(USBAudio.available()) {
+    // Temporary place for unprocessed USB audio samples
+    static uint16_t rx_buf[BUF_SIZE];
 
-  uint32_t len = USBAudio.read(rx_buf, BUF_SIZE*2);
-  len /= 2; // Two bytes per sample
+    uint32_t len = USBAudio.read(rx_buf, BUF_SIZE*2);
+    len /= 2; // Two bytes per sample
 
-  if(len) {
     uint8_t filled = bufs_filled();
 
     // Stop catching up/purging if we have done enough
