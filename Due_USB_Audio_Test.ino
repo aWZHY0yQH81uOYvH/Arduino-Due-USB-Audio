@@ -43,8 +43,8 @@ void set_buffer() {
 
   // If there is some data, play it with DMA
   if(filled) {
-    PDC_DACC->PERIPH_TNPR = (uint32_t)bufs[read_buffer].buf;
-    PDC_DACC->PERIPH_TNCR = bufs[read_buffer].len;
+    PDC_PWM->PERIPH_TNPR = (uint32_t)bufs[read_buffer].buf;
+    PDC_PWM->PERIPH_TNCR = bufs[read_buffer].len;
 
     // Increment read buffer
     read_buffer++;
@@ -55,8 +55,8 @@ void set_buffer() {
 
   // Otherwise insert a bit of silence
   else {
-    PDC_DACC->PERIPH_TNPR = (uint32_t)zero_buf;
-    PDC_DACC->PERIPH_TNCR = ZERO_BUF_SIZE;
+    PDC_PWM->PERIPH_TNPR = (uint32_t)zero_buf;
+    PDC_PWM->PERIPH_TNCR = ZERO_BUF_SIZE;
   }
 
   // Update sample rate based on current buffer fill level
@@ -68,7 +68,7 @@ void set_buffer() {
 }
 
 // ISR called when one buffer has been played
-void DACC_Handler() {
+void PWM_Handler() {
   set_buffer();
 }
 
@@ -77,35 +77,30 @@ void setup() {
   for(int x = 0; x < ZERO_BUF_SIZE; x++)
     zero_buf[x] = (1 << 11);
 
-  // Enable clock to DAC and PWM
-  PMC->PMC_PCER1 = (1 << (ID_DACC-32)) | (1 << (ID_PWM-32));
+  // Enable clock to PWM
+  PMC->PMC_PCER1 = (1 << (ID_PWM-32));
 
-  // Set up PWM as reference clock
-  PWM->PWM_ELMR[0] = PWM_ELMR_CSEL0; // Generate an event on line 0 when compare 0 matches
-  PWM->PWM_CMP[0].PWM_CMPV = 1; // Set compare 0 to trigger when channel 0 is 1 (zero doesn't work)
-  PWM->PWM_CMP[0].PWM_CMPM = PWM_CMPM_CEN; // Enable compare 0
+  // Set up PWM
+  PWM->PWM_SCM = PWM_SCM_SYNC0 // Enable channel 0 as a synchronous channel
+   | PWM_SCM_UPDM_MODE2; // Update synchronous channels from PDC
+  PWM->PWM_IDR1 = 0xFFFFFFFF; // Disable interrupts
+  PWM->PWM_IDR2 = 0xFFFFFFFF;
+  PWM->PWM_IER2 = PWM_IER2_ENDTX; // Enable end of buffer interrupt
   PWM->PWM_CH_NUM[0].PWM_CPRD = period >> PERIOD_ADJ_SPEED; // Set period to 48kHz
   PWM->PWM_CH_NUM[0].PWM_CCNT = 0; // Reset counter
 
-  // Set up DAC
-  DACC->DACC_MR = DACC_MR_TRGEN // Enable DAC trigger
-  | DACC_MR_TRGSEL(4) // Trigger from PWM event line 0
-  | DACC_MR_USER_SEL_CHANNEL1 // Select channel 1
-  | DACC_MR_REFRESH(10)
-  | DACC_MR_STARTUP_1024;
-  DACC->DACC_CHER = DACC_CHER_CH1; // Enable channel 1
-  DACC->DACC_IDR = 0xFFFFFFFF; // Disable interrupts
-  DACC->DACC_IER = DACC_IER_ENDTX; // Enable PDC end of buffer interrupt
-  DACC->DACC_ACR = DACC_ACR_IBCTLDACCORE(0b01) | DACC_ACR_IBCTLCH1(0b10);
+  // Connect PWML0 to PC2B = pin 34
+  PIOC->PIO_ABSR = (1 << 2); // Select peripheral function B
+  PIOC->PIO_PDR = (1 << 2); // Disable PIO control, switch to peripheral function
 
-  // Allow interrupts from the DAC
-  NVIC->ISER[1] = (1 << (DACC_IRQn-32));
-
-  // Set up DAC PDC
+  // Set up PWM PDC
   set_buffer();
-  PDC_DACC->PERIPH_PTCR = PERIPH_PTCR_TXTEN;
+  PDC_PWM->PERIPH_PTCR = PERIPH_PTCR_TXTEN;
 
-  // Start PWM as DAC clock
+  // Allow interrupts from the PWM
+  NVIC->ISER[1] = (1 << (PWM_IRQn-32));
+
+  // Start PWM
   PWM->PWM_ENA = PWM_ENA_CHID0;
 }
 
@@ -127,7 +122,7 @@ void loop() {
     if(!purge_bufs && filled < NBUFS-2) {
       // Convert samples from signed 16 bit to unsigned 12 bit
       for(uint32_t x = 0; x < len; x++)
-        bufs[write_buffer].buf[x] = ((int32_t)rx_buf[x] + 0x8000) >> 4;
+        bufs[write_buffer].buf[x] = ((int32_t)rx_buf[x] + 0x8000)*(F_CPU/NOM_SAMPLE_RATE)/0x10000;
 
       bufs[write_buffer].len = len;
 
