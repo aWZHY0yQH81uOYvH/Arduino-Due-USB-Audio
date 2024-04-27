@@ -112,7 +112,7 @@ void setup() {
 void loop() {
   if(USBAudio.available()) {
     // Temporary place for unprocessed USB audio samples
-    static uint16_t rx_buf[BUF_SIZE];
+    static int16_t rx_buf[BUF_SIZE];
 
     uint32_t len = USBAudio.read(rx_buf, BUF_SIZE*2);
     len /= 2; // Two bytes per sample
